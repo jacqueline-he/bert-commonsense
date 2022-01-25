@@ -65,6 +65,39 @@ class DataProcessor(object):
                 examples.append(InputExample(guid,sentence,candidate_b,candidate_a))
         return examples
 
+    def gap_test_new(self, source):
+        examples=[]
+        for line in tqdm(list(open(source,'r'))[1:],desc="Reading and pre-processing data"):
+            tokens = line.strip().split('\t')
+            guid = tokens[0]
+            sentence = tokens[1]
+            pronoun = tokens[2]
+            pronoun_offset = int(tokens[3])
+            sentence = sentence[:pronoun_offset]+"_"+sentence[pronoun_offset+len(pronoun):]
+            candidate_a = tokens[4]
+            candidate_b = tokens[7]
+            pn = None
+            if pronoun.lower() == 'his' or pronoun.lower() == 'he' or pronoun.lower =='him':
+                pn = 'M'
+            else:
+                pn = 'F'
+
+            if tokens[6].lower()=="true":
+                examples.append(InputExample(guid,sentence,candidate_a,candidate_b, ex_true=pn))
+            if tokens[9].lower()=="true":
+                examples.append(InputExample(guid,sentence,candidate_b,candidate_a, ex_true=pn))
+
+            # if tokens[6].lower()=="true":
+            #     examples.append(InputExample(guid + 'A',sentence,candidate_a, None, ex_true = "true"))
+            # else:
+            #     examples.append(InputExample(guid+ 'A',sentence,candidate_b, None, ex_true = "false"))
+            # if tokens[9].lower()=="true":
+            #     examples.append(InputExample(guid+ 'B',sentence,candidate_b,None,ex_true = "true"))
+            # else:
+            #     examples.append(InputExample(guid+ 'B',sentence,candidate_a, None,ex_true = "false"))
+
+        return examples
+
     def gap_test(self,source):
         examples=[]
         for line in tqdm(list(open(source,'r'))[1:],desc="Reading and pre-processing data"):
@@ -156,11 +189,11 @@ class DataProcessor(object):
                 "maskedwiki":"MaskedWiki_2.4Mtrain.txt",
                 }
         source = os.path.join(data_dir,file_names[set_name])
-        if set_name == "gap-train":
+        if set_name in ["gap-train"]:
             return self.gap_train(source)
         elif set_name in ["gap-dev","gap-test"]:
             return self.gap_test(source)
-        elif set_name in ["dpr-train","wscr-train","dpr-train-small","wikicrem-train","maskedwiki"]:
+        elif set_name in ["dpr-train","wscr-train","dpr-train-small","wikicrem-train","maskedwiki","winogender", "winobias-pro1","winobias-pro2","winobias-anti1","winobias-anti2"]:
             return self.read_dpr_format_train(source)
         elif set_name in ["dpr-test","wscr-test","dpr-dev-small","wsc","pdp","winogender","winobias-pro1","winobias-pro2","winobias-anti1","winobias-anti2","winobias-dev","wikicrem-dev"]:
             return self.read_dpr_format_test(source)

@@ -31,6 +31,7 @@ import logging
 from tqdm import tqdm, trange
 
 import numpy as np
+import torch.nn as nn
 import torch
 from torch.nn import CrossEntropyLoss
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -41,13 +42,35 @@ from pytorch_pretrained_bert.modeling import PreTrainedBertModel, BertModel, Ber
 from pytorch_pretrained_bert.optimization import BertAdam
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
 
-from data_reader import InputExample,DataProcessor
+from data_reader import InputExample, DataProcessor
 from scorer import scorer
+import wandb
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
                     datefmt = '%m/%d/%Y %H:%M:%S',
                     level = logging.INFO)
 logger = logging.getLogger(__name__)
+
+wandb.init('coref-bert')
+
+class MLP(nn.Module):
+    def __init__(self, D_in, D_out, n_layer=2):
+        super().__init__()
+        if n_layer == 1:
+            self.linear = nn.Linear(D_in, D_out)
+        elif n_layer == 2:
+            self.linear = nn.Sequential(
+                nn.Linear(D_in, D_out),
+                nn.ReLU(),
+                nn.Linear(D_out, D_out)
+            )
+        self.activation = nn.ReLU()
+        
+    def forward(self,x):
+        x = self.linear(x)
+        x = self.activation(x)
+        return x
+
 
 class BertForMaskedLM(PreTrainedBertModel):
     """BERT model with the masked language modeling head.
@@ -61,15 +84,35 @@ class BertForMaskedLM(PreTrainedBertModel):
         self.cls = BertOnlyMLMHead(config, self.bert.embeddings.word_embeddings.weight)
         self.apply(self.init_bert_weights)
 
+        ## add fairfil stuff
+        self.fairfil = MLP(768, 768, 2)
+        self.fairfil.linear.load_state_dict(torch.load('/n/fs/scratch/jh70/fairfil_tok_layer_2/fairfil_tok_ckpt_800_0.pth', map_location=torch.device('cuda')))
+        for param in self.fairfil.parameters():
+            param.requires_grad = False
+
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, masked_lm_labels=None):
         sequence_output, _ = self.bert(input_ids, token_type_ids, attention_mask,
                                        output_all_encoded_layers=False)
-        prediction_scores = self.cls(sequence_output)
 
-        if masked_lm_labels is not None:
+        ## shape is 16 x 128 x 768
+
+        bs = sequence_output.size(0)
+        fair_embs = []
+        for i in range(bs):
+            fair_embs.append(self.fairfil(sequence_output[i]))
+        
+        fair_embs = torch.stack(fair_embs)
+        #print(fair_embs.shape)
+        
+        # assert(0 == 1)
+        prediction_scores = self.cls(fair_embs)
+        #prediction_scores = self.cls(sequence_output)
+
+        if masked_lm_labels is not None: # -1's 
             loss_fct = CrossEntropyLoss(ignore_index=-1,reduction='none')
             masked_lm_loss = loss_fct(prediction_scores.permute(0,2,1), masked_lm_labels)
-            return torch.mean(masked_lm_loss,1)
+            #num_masks = torch.count_nonzero(masked_lm_labels>-1, axis=1)
+            return torch.mean(masked_lm_loss,1) 
         else:
             return prediction_scores
 
@@ -491,6 +534,7 @@ def main():
                 tr_loss += loss.item()
                 nb_tr_examples += input_ids_1.size(0)
                 nb_tr_steps += 1
+                wandb.log({'loss': loss})
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     optimizer.step()
                     model.zero_grad()
@@ -533,11 +577,11 @@ def main():
 
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         print("GAP-test: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="gap-test"))
-        print("DPR/WSCR-test: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="dpr-test"))
-        print("WSC: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="wsc"))
-        print("WinoGender: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="winogender"))
-        _=test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="wnli")
-        print("PDP: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="pdp"))
+        #print("DPR/WSCR-test: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="dpr-test"))
+        #print("WSC: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="wsc"))
+        #print("WinoGender: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="winogender"))
+        #_=test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="wnli")
+        #print("PDP: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="pdp"))
         print("WinoBias Anti Stereotyped Type 1: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="winobias-anti1"))
         print("WinoBias Pro Stereotyped Type 1: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="winobias-pro1"))
         print("WinoBias Anti Stereotyped Type 2: ",test(processor, args, tokenizer, model, device, global_step = global_step, tr_loss = tr_loss/nb_tr_steps, test_set="winobias-anti2"))
